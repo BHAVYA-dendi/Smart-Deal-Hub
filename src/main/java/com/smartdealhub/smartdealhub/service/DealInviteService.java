@@ -43,12 +43,24 @@ public class DealInviteService {
 
     // ================== Update Invite Status ==================
     public Optional<DealInvite> updateStatus(Long inviteId, InviteStatus status) {
+        return updateStatus(inviteId, status, null, false);
+    }
+
+    public Optional<DealInvite> updateStatus(Long inviteId, InviteStatus status, Long currentUserId, boolean isAdmin) {
         Optional<DealInvite> inviteOpt = inviteRepository.findById(inviteId);
-        inviteOpt.ifPresent(invite -> {
-            invite.setStatus(status);
-            inviteRepository.save(invite);
-        });
-        return inviteOpt;
+        if (inviteOpt.isEmpty()) {
+            return inviteOpt;
+        }
+        DealInvite invite = inviteOpt.get();
+        if (!isAdmin) {
+            if (currentUserId == null || invite.getReceiver() == null
+                    || !currentUserId.equals(invite.getReceiver().getUserId())) {
+                throw new RuntimeException("Forbidden");
+            }
+        }
+        invite.setStatus(status);
+        inviteRepository.save(invite);
+        return Optional.of(invite);
     }
 
     // ================== Get Invites by Receiver ==================

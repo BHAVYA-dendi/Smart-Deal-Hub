@@ -82,15 +82,29 @@ public class StoreService {
         if(s == null) return null;
         try{
             if(s.getOwner()!=null){
-                // Break potential recursion and sensitive data
-                s.getOwner().setStores(null);
-                s.getOwner().setPassword(null);
+                trimUserForJson(s.getOwner());
             }
-            // Also remove heavy backrefs/collections if present
             try { s.setProducts(null); } catch(Exception ignored){}
             try { s.setStoreHours(null); } catch(Exception ignored){}
+            try { s.setFavorites(null); } catch(Exception ignored){}
+            try { s.setVisitedStores(null); } catch(Exception ignored){}
         }catch(Exception ignored){}
         return s;
+    }
+
+    private void trimUserForJson(User user) {
+        if (user == null) return;
+        user.setPassword(null);
+        user.setStores(null);
+        user.setReviews(null);
+        user.setFavorites(null);
+        user.setGroupDealsInitiated(null);
+        user.setGroupMemberships(null);
+        user.setSentInvites(null);
+        user.setReceivedInvites(null);
+        user.setNotifications(null);
+        user.setFeedbacks(null);
+        user.setVisitedStores(null);
     }
 
     public List<Store> getStoresByCity(String city) {

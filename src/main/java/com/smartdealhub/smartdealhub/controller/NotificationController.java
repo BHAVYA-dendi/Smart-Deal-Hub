@@ -6,7 +6,9 @@ import com.smartdealhub.smartdealhub.repository.*;
 import com.smartdealhub.smartdealhub.service.NotificationService;
 import com.smartdealhub.smartdealhub.service.PushNotificationService;
 import com.smartdealhub.smartdealhub.service.UserService;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,45 +24,60 @@ public class NotificationController {
     private final UserService userService;
     private final UserRepository userRepository;
     private final NotificationRepository notificationRepository;
-    // ============================
-    // 🔹 GET NOTIFICATIONS
-    // ============================
 
-    // Get all notifications for a user
+    private User requireCurrentUser(HttpServletRequest request) {
+        Object cu = request.getAttribute("currentUser");
+        if (cu instanceof User user) return user;
+        throw new RuntimeException("Unauthenticated");
+    }
+
+    private boolean canAccessUser(User current, Long userId) {
+        return current.getRole() == User.Role.ADMIN || current.getUserId().equals(userId);
+    }
+
+    private Notification requireOwnedNotification(Long notificationId, User current) {
+        Notification notification = notificationRepository.findById(notificationId)
+                .orElseThrow(() -> new RuntimeException("Notification not found with ID: " + notificationId));
+        if (current.getRole() != User.Role.ADMIN
+                && (notification.getUser() == null || !current.getUserId().equals(notification.getUser().getUserId()))) {
+            throw new RuntimeException("Forbidden");
+        }
+        return notification;
+    }
+
     @GetMapping("/user/{userId}")
-    public List<Notification> getNotificationsForUser(Long userId) {
+    public ResponseEntity<List<Notification>> getNotificationsForUser(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found with ID: " + userId));
-        return notificationRepository.findByUser(user);
+        return ResponseEntity.ok(notificationRepository.findByUser(user));
     }
 
-    // Get only unread notifications for a user
     @GetMapping("/user/{userId}/unread")
-    public ResponseEntity<List<Notification>> getUnreadNotifications(@PathVariable Long userId) {
-        List<Notification> notifications = notificationService.getUnreadNotifications(userId);
-        return ResponseEntity.ok(notifications);
+    public ResponseEntity<List<Notification>> getUnreadNotifications(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        return ResponseEntity.ok(notificationService.getUnreadNotifications(userId));
     }
 
-    // ============================
-    // 🔹 CREATE / SEND NOTIFICATIONS
-    // ============================
-
-    // Send notification to a single user (user, store owner, or admin)
     @PostMapping("/send/user/{userId}")
     public ResponseEntity<Notification> sendNotificationToUser(
             @PathVariable Long userId,
-            @RequestBody String message) {
-
+            @RequestBody String message,
+            HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != User.Role.ADMIN) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         User user = userService.getUserById(userId);
         Notification notification = notificationService.createNotification(user, message);
         pushNotificationService.sendPush(user, notification);
-
         return ResponseEntity.ok(notification);
     }
 
-    // Send notification to multiple users (admin feature)
     @PostMapping("/send/all")
-    public ResponseEntity<String> sendNotificationToAll(@RequestBody String message) {
+    public ResponseEntity<String> sendNotificationToAll(@RequestBody String message, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != User.Role.ADMIN) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         List<User> users = userService.getAllUsers();
         for (User user : users) {
             Notification notification = notificationService.createNotification(user, message);
@@ -69,22 +86,18 @@ public class NotificationController {
         return ResponseEntity.ok("Notification sent to all users");
     }
 
-
-
-    // ============================
-    // 🔹 UPDATE NOTIFICATIONS
-    // ============================
-
-    // Mark a notification as read
     @PutMapping("/{notificationId}/read")
-    public ResponseEntity<String> markAsRead(@PathVariable Long notificationId) {
+    public ResponseEntity<String> markAsRead(@PathVariable Long notificationId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        requireOwnedNotification(notificationId, current);
         notificationService.markAsRead(notificationId);
         return ResponseEntity.ok("Notification marked as read");
     }
 
-    // Delete a notification
     @DeleteMapping("/{notificationId}")
-    public ResponseEntity<String> deleteNotification(@PathVariable Long notificationId) {
+    public ResponseEntity<String> deleteNotification(@PathVariable Long notificationId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        requireOwnedNotification(notificationId, current);
         notificationService.deleteNotification(notificationId);
         return ResponseEntity.ok("Notification deleted");
     }

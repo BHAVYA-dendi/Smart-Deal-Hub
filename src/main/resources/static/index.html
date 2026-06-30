@@ -5,6 +5,7 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Smart Deals Hub</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='24' font-size='24'%3E🛒%3C/text%3E%3C/svg%3E"/>
     <style>
         /* Offers Grid */
         .offers-grid {
@@ -77,6 +78,34 @@
             font-size: 0.9rem;
             color: #666;
         }
+
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: 420px;
+        }
+        .toast {
+            padding: 14px 18px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            line-height: 1.4;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+            opacity: 0;
+            transform: translateX(20px);
+            transition: opacity 0.25s ease, transform 0.25s ease;
+        }
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast-success { background: #2ecc71; }
+        .toast-error { background: #e74c3c; }
+        .toast-info { background: #3498db; }
+        .toast-warning { background: #f39c12; }
 
         .review-product {
             display: block;
@@ -997,10 +1026,68 @@
     </div>
 </div>
 
+<div id="toastContainer" class="toast-container"></div>
+
 <script>
     const API_BASE = window.location.origin;
     let currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
     let authToken = localStorage.getItem('authToken');
+
+    function parseApiError(text) {
+      if (!text) return 'Unexpected error occurred';
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.message) return String(parsed.message);
+      } catch (e) {
+        // fall through to plain-text handling
+      }
+      const cleaned = String(text).replace(/^"+|"+$/g, '').trim();
+      return cleaned || 'Unexpected error occurred';
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer') || (() => {
+        const el = document.createElement('div');
+        el.id = 'toastContainer';
+        el.className = 'toast-container';
+        document.body.appendChild(el);
+        return el;
+      })();
+      const toast = document.createElement('div');
+      const kind = ['success', 'error', 'warning', 'info'].includes(type) ? type : 'info';
+      toast.className = `toast toast-${kind}`;
+      toast.textContent = String(message || '');
+      container.appendChild(toast);
+      requestAnimationFrame(() => toast.classList.add('show'));
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+      }, 4500);
+    }
+
+    function notifyUser(message, type) {
+      showToast(message, type || 'info');
+    }
+
+    async function loadUserData() {
+      if (!authToken) return;
+      try {
+        const meResp = await fetch(`${API_BASE}/api/users/me`, {
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (!meResp.ok) return;
+        const me = await meResp.json();
+        currentUser = {
+          ...currentUser,
+          ...me,
+          id: me.userId != null ? String(me.userId) : currentUser.id,
+          userId: me.userId != null ? me.userId : currentUser.userId
+        };
+        localStorage.setItem('currentUser', JSON.stringify(currentUser));
+      } catch (e) {
+        console.warn('loadUserData failed', e);
+      }
+    }
 
     // Helper: strip trailing commas before } or ]
     function stripTrailingCommas(s){
@@ -1430,82 +1517,62 @@
     // Initialize test users when the page loads
     ensureTestUsers();
 
-    // Login handler: backend-first with fallback to test users
+    // Login handler: backend-authoritative role + token
     document.getElementById('loginForm').onsubmit = async function(e) {
       e.preventDefault();
 
       const rawEmail = document.getElementById('loginEmail').value.trim();
-      const emailLc = rawEmail.toLowerCase();
       const password = document.getElementById('loginPassword').value.trim();
       const loginBtn = this.querySelector('button[type="submit"]');
       const originalBtnText = loginBtn ? loginBtn.innerHTML : '';
 
-      if (!rawEmail || !password) { alert('Please enter both email and password'); return false; }
+      if (!rawEmail || !password) { notifyUser('Please enter both email and password.', 'warning'); return false; }
       if (loginBtn) { loginBtn.disabled = true; loginBtn.innerHTML = 'Logging in...'; }
 
       try {
-        // Backend auth
-        try {
-          const resp = await fetch(`${window.location.origin}/api/users/login`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: rawEmail, password })
-          });
-          if (resp.ok) {
-            const data = await resp.json().catch(()=>({}));
-            const token = data.token || '';
-            const role = (data.role || 'USER').toString();
-            const id = Date.now().toString();
-            const name = rawEmail.split('@')[0];
-            const resolvedEmail = data.email || rawEmail;
-            if (token) { localStorage.setItem('authToken', token); authToken = token; }
-            if (typeof data.needStoreSetup !== 'undefined') localStorage.setItem('needStoreSetup', String(!!data.needStoreSetup));
-            if (typeof data.storeId !== 'undefined' && data.storeId !== null) localStorage.setItem('storeId', String(data.storeId));
-            localStorage.setItem('currentUser', JSON.stringify({ id, email: resolvedEmail, name, role }));
-            if (!localStorage.getItem('authToken')) { localStorage.setItem('authToken', 'dev'); authToken = 'dev'; }
-            currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
-            const lp = document.getElementById('loginPage'); if (lp) lp.classList.add('hidden');
-            showDashboard(role);
-            return false;
-          } else {
-            const errText = await resp.text().catch(()=> '');
-            const devUsers = ['user@example.com','owner@example.com','admin@example.com'];
-            const isDev = devUsers.includes(emailLc);
-            const hasLocal = (typeof getUsers === 'function') && (getUsers()||[]).some(u => String(u.email||'').toLowerCase()===emailLc);
-            if (!isDev && !hasLocal) { alert(`Login failed (${resp.status}). ${errText || 'Please check your credentials.'}`); return false; }
-          }
-        } catch (err) { console.warn('Backend auth error:', err); }
-
-        // Local users fallback
-        try {
-          const localUsers = (typeof getUsers === 'function') ? getUsers() : [];
-          const lu = (localUsers || []).find(u => String(u.email || '').toLowerCase() === emailLc);
-          if (lu && (password === lu.password || password === 'password')) {
-            const role = (lu.role || 'USER').toString();
-            currentUser = { id: lu.id || Date.now().toString(), email: lu.email, name: lu.name || lu.email.split('@')[0], role };
-            localStorage.setItem('currentUser', JSON.stringify(currentUser));
-            localStorage.setItem('authToken', 'dev');
-            const lp = document.getElementById('loginPage'); if (lp) lp.classList.add('hidden');
-            showDashboard(role);
-            return false;
-          }
-        } catch (e) { console.warn('Local users fallback error:', e); }
-
-        // Test users fallback
-        const testUsers = {
-          'user@example.com': { password: 'password', role: 'USER', name: 'Test User' },
-          'owner@example.com': { password: 'password', role: 'STORE_OWNER', name: 'Store Owner' },
-          'admin@example.com': { password: 'password', role: 'ADMIN', name: 'Admin User' }
-        };
-        const tu = testUsers[emailLc];
-        if (tu && tu.password === password) {
-          currentUser = { id: Date.now().toString(), email: rawEmail, name: tu.name, role: tu.role };
-          localStorage.setItem('currentUser', JSON.stringify(currentUser));
-          localStorage.setItem('authToken', 'dev'); authToken = 'dev';
-          const lp = document.getElementById('loginPage'); if (lp) lp.classList.add('hidden');
-          showDashboard(tu.role);
+        const resp = await fetch(`${window.location.origin}/api/users/login`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: rawEmail, password })
+        });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(()=> '');
+          notifyUser(parseApiError(errText) || 'Invalid email or password.', 'error');
           return false;
         }
-
-        alert('Invalid email or password');
+        const data = await resp.json().catch(()=>({}));
+        const token = data.token || '';
+        const role = (data.role || 'USER').toString().toUpperCase();
+        let userId = data.userId != null ? String(data.userId) : null;
+        let name = data.name || rawEmail.split('@')[0];
+        const resolvedEmail = data.email || rawEmail;
+        if (!token) {
+          notifyUser('Login failed: authentication token missing.', 'error');
+          return false;
+        }
+        localStorage.setItem('authToken', token);
+        authToken = token;
+        try {
+          const meResp = await fetch(`${window.location.origin}/api/users/me`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (meResp.ok) {
+            const me = await meResp.json();
+            if (me.userId != null) userId = String(me.userId);
+            if (me.name) name = me.name;
+          }
+        } catch (e) { console.warn('Could not load /me after login', e); }
+        if (typeof data.needStoreSetup !== 'undefined') localStorage.setItem('needStoreSetup', String(!!data.needStoreSetup));
+        if (typeof data.storeId !== 'undefined' && data.storeId !== null) localStorage.setItem('storeId', String(data.storeId));
+        localStorage.setItem('currentUser', JSON.stringify({
+          id: userId || Date.now().toString(),
+          userId: userId || null,
+          email: resolvedEmail,
+          name,
+          role,
+          approvalStatus: data.approvalStatus || 'APPROVED'
+        }));
+        currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
+        const lp = document.getElementById('loginPage'); if (lp) lp.classList.add('hidden');
+        showDashboard(role);
         return false;
       } finally {
         if (loginBtn) { loginBtn.disabled = false; loginBtn.innerHTML = originalBtnText; }
@@ -1520,8 +1587,14 @@
       const phone = document.getElementById('regPhone').value.trim();
       const role = document.getElementById('regRole').value;
 
+      if (!name || !email || !password) {
+        notifyUser('Name, email, and password are required.', 'warning');
+        return;
+      }
+
       const endpoint =
         role === 'ADMIN' ? '/api/users/register/admin' :
+        role === 'STORE_OWNER' ? '/api/users/register/storeowner' :
         '/api/users/register';
 
       try{
@@ -1544,19 +1617,24 @@
             method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify(payload)
           });
-          if(!resp.ok){ console.warn('Backend registration failed, using local.'); }
-        }catch(err){ console.warn('Backend registration unreachable, using local.'); }
+          if(!resp.ok){
+            const errText = await resp.text().catch(()=>'');
+            throw new Error(parseApiError(errText) || `Registration failed (${resp.status})`);
+          }
+          const result = await resp.json().catch(() => ({}));
+          const serverMessage = result.message || result.error;
+          if(role==='USER'){
+            notifyUser(serverMessage || 'Registration successful! Please login.', 'success');
+          } else {
+            notifyUser(serverMessage || 'Account pending admin approval. You can login after approval.', 'success');
+          }
+        }catch(err){ throw err; }
 
-        const users = getUsers();
-        if(!users.find(u=>u.email===email)){
-          const approved = role==='USER';
-          users.push({ email, role, name, phone, banned:false, approved, createdAt: now() });
-          setUsers(users);
-        }
-        if(role==='USER'){ alert('Registration successful! Please login.'); }
-        else{ alert('Registration submitted. Await admin approval before login.'); }
         showLogin();
-      }catch(err){ console.error(err); alert('Registration error. See console.') }
+      }catch(err){
+        console.error(err);
+        notifyUser(err.message || 'Registration failed. Please try again.', 'error');
+      }
     });
 
     // Toggle store owner fields on role change
@@ -1638,13 +1716,15 @@
         }
 
         // 3. Determine dashboard ID
-        const userRole = (role || currentUser.role || 'USER').toLowerCase();
+        const userRole = String(role || currentUser.role || 'USER').toUpperCase();
         let dashboardId = 'userDashboard'; // default
 
-        if (userRole.includes('admin')) {
+        if (userRole === 'ADMIN') {
           dashboardId = 'adminDashboard';
-        } else if (userRole.includes('owner') || userRole.includes('store')) {
+        } else if (userRole === 'STORE_OWNER') {
           dashboardId = 'storeOwnerDashboard';
+        } else if (userRole !== 'USER') {
+          throw new Error(`Invalid role for dashboard routing: ${userRole}`);
         }
 
         console.log('Selected dashboard:', dashboardId, 'for role:', userRole);
@@ -1749,7 +1829,7 @@
         safeClassList(document.body, 'remove', 'dashboard-visible');
 
         // Show error message
-        alert(`Error: ${error.message || 'Failed to load dashboard'}\n\nCheck browser console for details.`);
+        notifyUser(error.message || 'Failed to load dashboard.', 'error');
       }
     }
 
@@ -1796,6 +1876,15 @@
       }
     });
     function logout(){ 
+      const uid = currentUser && (currentUser.userId || currentUser.id);
+      if (authToken && uid) {
+        fetch(`${API_BASE}/api/users/logout/${encodeURIComponent(uid)}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        }).catch(()=>{});
+      }
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('currentUser');
       // Close any open sidebars first
       try{
         const role = (currentUser && currentUser.role) || 'USER';
@@ -1864,7 +1953,7 @@
     }
 
     // Admin sidebar entries (active)
-    function adminOpenUserApprovals(){ try{ adminOpenUsers() }catch(e){ alert('User approvals view not available.'); } }
+    function adminOpenUserApprovals(){ try{ adminOpenUsers() }catch(e){ notifyUser('User approvals view not available.'); } }
     function adminOpenReviews(){
       document.querySelectorAll('#adminDashboard .content-section').forEach(s=>s.classList.remove('active'));
       let el = document.getElementById('adminReviews');
@@ -1999,9 +2088,9 @@
       try{
         const curr = (document.getElementById('currPwd')?.value||'').trim();
         const next = (document.getElementById('newPwd')?.value||'').trim();
-        if(!next){ alert('Enter new password'); return }
+        if(!next){ notifyUser('Enter new password'); return }
         const userId = await ensureCurrentUserId();
-        if(!userId){ alert('Please sign in again'); return }
+        if(!userId){ notifyUser('Please sign in again'); return }
         let resp = await fetch(`${API_BASE}/api/users/change-password/${encodeURIComponent(userId)}`, {
           method:'PUT',
           headers:{ 'Content-Type':'application/json', ...(authToken?{'Authorization':`Bearer ${authToken}`}:{}) },
@@ -2010,11 +2099,11 @@
         });
         if(!resp.ok){
           const msg = await resp.text().catch(()=> 'Failed to change password');
-          alert(msg); return;
+          notifyUser(msg); return;
         }
-        alert('Password changed successfully');
+        notifyUser('Password changed successfully.', 'success');
         closeModal();
-      }catch(e){ alert('Failed to change password') }
+      }catch(e){ notifyUser('Failed to change password.', 'error') }
     }
 
     async function openFavorites(){
@@ -2307,7 +2396,7 @@
 
     function openMyGroupDeals(){
       if(!(currentUser && currentUser.role === 'USER')){
-        alert('Please log in as a user to view your group deals.');
+        notifyUser('Please log in as a user to view your group deals.');
         return;
       }
 
@@ -2774,8 +2863,7 @@
       try{
         let serverStores = [];
         try{
-          let resp = await fetch(`${API_BASE}/api/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{}});
-          if(!resp.ok){ resp = await fetch(`${API_BASE}/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{} }) }
+          let resp = await fetch(`${API_BASE}/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{}});
           if(resp.ok) serverStores = await resp.json();
         }catch{}
         // Prefer backend stores if available; otherwise fallback to local
@@ -2803,12 +2891,13 @@
         }
         norm.forEach(store=>{
           const label = `${store.name}${store.city?` — ${store.city}`:''}`;
+          const payload = JSON.stringify({ storeId: store.storeId, name: store.name, city: store.city || '' });
           container.innerHTML += `
             <div class="card">
-              <input type="checkbox" id="store_${store.storeId}" value="${store.storeId}" onchange='trackViewedStore(${JSON.stringify({storeId:0,name:"",city:""})})'/>
-              <label for="store_${store.storeId}">${label}</label>
+              <input type="checkbox" id="store_${store.storeId}" value="${store.storeId}" onchange='trackViewedStore(${payload})'/>
+              <label for="store_${store.storeId}">${escapeHtml(label)}</label>
             </div>
-          `.replace('storeId":0','storeId":'+JSON.stringify(store.storeId)).replace('name":""',`name:${JSON.stringify(store.name)}`).replace('city":""',`city:${JSON.stringify(store.city||'')}`);
+          `;
         });
       }catch(err){ console.error(err) }
     }
@@ -2837,7 +2926,7 @@
     async function optimizeRoute(){
       const checked=[...document.querySelectorAll('#storeSelection input[type="checkbox"]:checked')];
       const storeIds=checked.map(cb=>parseInt(cb.value,10));
-      if(storeIds.length===0){ alert('Please select at least one store'); return }
+      if(storeIds.length===0){ notifyUser('Please select at least one store'); return }
       const startLocation=document.getElementById('startLocation').value.trim() || '17.385,78.4867';
       try{
         const resp = await fetch(`${API_BASE}/stores/route/optimize`, {
@@ -3093,7 +3182,7 @@
         if(resp && resp.ok){
           const result = await resp.json().catch(()=>({}));
           if(result.id) {
-            alert(`Group Deal Created Successfully!\n\nDeal ID: ${result.id}\nProduct: ${result.productName || prod.name}\nStatus: ${result.status || 'Active'}\n\nYou can now manage members and track progress in "My Group Deals".`);
+            notifyUser(`Group Deal Created Successfully!\n\nDeal ID: ${result.id}\nProduct: ${result.productName || prod.name}\nStatus: ${result.status || 'Active'}\n\nYou can now manage members and track progress in "My Group Deals".`);
             pushNotification('Group created successfully');
             cachedDealsAt = 0; 
             await ensureDealsCache();
@@ -3291,7 +3380,7 @@
     async function openJoinDealModal(){
       const userId = await ensureCurrentUserId();
       if (!userId) {
-        alert('Please log in to join a group deal.');
+        notifyUser('Please log in to join a group deal.');
         return;
       }
 
@@ -3435,7 +3524,7 @@
       try {
         const userId = await ensureCurrentUserId();
         if (!userId) {
-          alert('Please log in to join a deal');
+          notifyUser('Please log in to join a deal');
           return;
         }
 
@@ -3474,7 +3563,7 @@
               if (statusEl) {
                 statusEl.innerHTML = `<span class="text-success"><i class="fas fa-check-circle"></i> ${escapeHtml(message)}</span>`;
               } else {
-                alert(message);
+                notifyUser(message);
               }
 
               cachedDealsAt = 0;
@@ -3499,7 +3588,7 @@
         if (statusEl) {
           statusEl.innerHTML = `<span class="text-danger"><i class="fas fa-exclamation-circle"></i> ${escapeHtml(error.message || 'Failed to join deal. Please try again.')}</span>`;
         } else {
-          alert(error.message || 'Failed to join deal. Please try again.');
+          notifyUser(error.message || 'Failed to join deal. Please try again.');
         }
       }
     }
@@ -3515,7 +3604,7 @@
         }
         if(resp && resp.ok){
           const result = await resp.json().catch(()=>({}));
-          alert(`Member Approved!\n\n${result.message || 'Member approved successfully'}`);
+          notifyUser(`Member Approved!\n\n${result.message || 'Member approved successfully'}`);
           pushNotification(result.message || 'Member approved successfully');
           cachedDealsAt = 0; 
           await ensureDealsCache();
@@ -3523,7 +3612,7 @@
           // Close the manage modal and refresh
           closeModal();
         }else{
-          alert('Failed to approve member. Please try again.');
+          notifyUser('Failed to approve member. Please try again.');
           pushNotification('Failed to approve member');
         }
       }catch{}
@@ -3540,7 +3629,7 @@
         }
         if(resp && resp.ok){
           const result = await resp.json().catch(()=>({}));
-          alert(`Member Rejected!\n\n${result.message || 'Member rejected successfully'}`);
+          notifyUser(`Member Rejected!\n\n${result.message || 'Member rejected successfully'}`);
           pushNotification(result.message || 'Member rejected successfully');
           cachedDealsAt = 0; 
           await ensureDealsCache();
@@ -3548,7 +3637,7 @@
           // Close the manage modal and refresh
           closeModal();
         }else{
-          alert('Failed to reject member. Please try again.');
+          notifyUser('Failed to reject member. Please try again.');
           pushNotification('Failed to reject member');
         }
       }catch{}
@@ -3559,7 +3648,7 @@
       if(!confirm('Are you sure you want to leave this group deal?')) return;
       const userId = await ensureCurrentUserId();
       if(!userId) {
-        alert('Please log in to leave deals');
+        notifyUser('Please log in to leave deals');
         return;
       }
       
@@ -3571,13 +3660,13 @@
           resp = await fetch(abs, { method:'POST', headers: authToken?{'Authorization':`Bearer ${authToken}`}:{}}).catch(()=>null);
         }
         if(resp && resp.ok){
-          alert('Successfully Left Group Deal!\n\nYou have been removed from the deal.');
+          notifyUser('Successfully Left Group Deal!\n\nYou have been removed from the deal.');
           pushNotification('Left deal successfully');
           cachedDealsAt = 0; 
           await ensureDealsCache();
           await renderUserDeals();
         }else{
-          alert('Failed to leave deal. Please try again.');
+          notifyUser('Failed to leave deal. Please try again.');
           pushNotification('Failed to leave deal');
         }
       }catch{}
@@ -3594,13 +3683,13 @@
           resp = await fetch(abs, { method:'DELETE', headers: authToken?{'Authorization':`Bearer ${authToken}`}:{}}).catch(()=>null);
         }
         if(resp && resp.ok){
-          alert('Group Deal Deleted Successfully!\n\nThe deal has been permanently removed.');
+          notifyUser('Group Deal Deleted Successfully!\n\nThe deal has been permanently removed.');
           pushNotification('Group deal deleted successfully');
           cachedDealsAt = 0; 
           await ensureDealsCache();
           await renderUserDeals();
         }else{
-          alert('Failed to delete group deal. Please try again.');
+          notifyUser('Failed to delete group deal. Please try again.');
           pushNotification('Failed to delete group deal');
         }
       }catch{}
@@ -3611,7 +3700,7 @@
       if(!code) return;
       const deals=getGroupDeals();
       const d=deals.find(x=>x.code===code);
-      if(!d){ alert('Deal not found'); return }
+      if(!d){ notifyUser('Deal not found'); return }
       if(!d.participants.includes(currentUser.email)){ d.participants.push(currentUser.email); setGroupDeals(deals); pushNotification(`Joined deal ${code}`) }
       closeModal();
       renderUserDeals();
@@ -3620,7 +3709,7 @@
     function joinDealFromList(code){
       const deals=getGroupDeals();
       const d=deals.find(x=>x.code===code);
-      if(!d){ alert('Deal not found'); return }
+      if(!d){ notifyUser('Deal not found'); return }
       if(!d.participants.includes(currentUser.email)){
         d.participants.push(currentUser.email); setGroupDeals(deals);
         const product = getCatalog().find(p=> (p.name||'')===d.productName);
@@ -4111,22 +4200,26 @@
       document.querySelectorAll('#adminDashboard .content-section').forEach(s=>s.classList.remove('active'));
       const el=document.getElementById('adminUsers'); el.classList.add('active');
       toggleSidebar();
-      const users=getUsers();
-      // Try to resolve stores to show for store owners
+      el.innerHTML = `<button class="btn btn-sm btn-secondary" onclick="adminShowLanding()">← Back</button><div class="spacer"></div><h3 style="color:#667eea">User Management</h3><div class="card">Loading users...</div>`;
+      let users = [];
+      try {
+        const resp = await fetch(`${API_BASE}/api/users`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
+        if (!resp.ok) throw new Error(await resp.text().catch(()=>`Failed (${resp.status})`));
+        users = await resp.json();
+      } catch (err) {
+        el.innerHTML = `<button class="btn btn-sm btn-secondary" onclick="adminShowLanding()">← Back</button><div class="spacer"></div><h3 style="color:#667eea">User Management</h3><div class="card">Failed to load users: ${escapeHtml(err.message || err)}</div>`;
+        return;
+      }
       let stores=[];
       try{
-        let r = await fetch(`${API_BASE}/api/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{} });
-        if(!r.ok) r = await fetch(`${API_BASE}/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{} });
+        let r = await fetch(`${API_BASE}/stores/all`, { headers: authToken?{'Authorization':`Bearer ${authToken}`}:{} });
         if(r.ok){ stores = await r.json(); }
       }catch{}
-      const storeByOwnerEmail = {};
       const storeByOwnerId = {};
       try{
         (stores||[]).forEach(s=>{
           const owner = s?.owner || s?.user || s?.storeOwner;
-          const em = owner && owner.email ? String(owner.email).toLowerCase() : null;
           const oid = owner && (owner.userId || owner.id);
-          if(em) storeByOwnerEmail[em] = s;
           if(oid!=null) storeByOwnerId[String(oid)] = s;
         });
       }catch{}
@@ -4139,24 +4232,22 @@
           <tbody>
             ${users.map(u=>{
               const role = u.role || 'USER';
-              const canApprove = !u.approved && (role==='ADMIN' || role==='STORE_OWNER');
+              const approved = u.approvalStatus === 'APPROVED';
+              const canApprove = !approved && (role==='ADMIN' || role==='STORE_OWNER');
               const uid = u.userId || u.id;
               let store = null;
-              if(role==='STORE_OWNER'){
-                if(uid!=null && storeByOwnerId[String(uid)]) store = storeByOwnerId[String(uid)];
-                else store = storeByOwnerEmail[String((u.email||'')).toLowerCase()]||null;
-              }
+              if(role==='STORE_OWNER' && uid!=null && storeByOwnerId[String(uid)]) store = storeByOwnerId[String(uid)];
               const storeLabel = store ? (store.name || (`#${store.storeId||store.id||''}`)) : '';
               return `
               <tr>
-                <td>${u.email}</td>
-                <td>${u.role}</td>
-                <td>${u.approved?'<span class="tag">Yes</span>':'<span class="tag">Pending</span>'}</td>
-                <td>${u.banned?'Banned':'Active'}</td>
-                <td>${storeLabel?`<span class="tag">${storeLabel}</span>`:''}</td>
+                <td>${escapeHtml(u.email)}</td>
+                <td>${escapeHtml(role)}</td>
+                <td>${approved?'<span class="tag">Yes</span>':'<span class="tag">Pending</span>'}</td>
+                <td>${u.active===false?'Banned':'Active'}</td>
+                <td>${storeLabel?`<span class="tag">${escapeHtml(storeLabel)}</span>`:''}</td>
                 <td>
-                  ${canApprove?`<button class="btn btn-sm" onclick="adminApproveUser('${u.email}')">Approve</button>`:''}
-                  <button class="btn btn-sm ${u.banned?'':'btn-danger'}" onclick="adminToggleBan('${u.email}')">${u.banned?'Unban':'Ban'}</button>
+                  ${canApprove?`<button class="btn btn-sm" onclick="adminApproveUser(${uid})">Approve</button>`:''}
+                  <button class="btn btn-sm ${u.active===false?'':'btn-danger'}" onclick="adminToggleBan(${uid}, ${u.active!==false})">${u.active===false?'Unban':'Ban'}</button>
                 </td>
               </tr>
               `;
@@ -4165,17 +4256,34 @@
         </table>
       `;
     }
-    function adminApproveUser(email){
-      const users=getUsers();
-      const idx=users.findIndex(u=>u.email===email); if(idx<0) return;
-      users[idx].approved=true; setUsers(users);
-      pushNotification(`Approved user ${email}`);
-      adminOpenUsers();
+    async function adminApproveUser(userId){
+      if(!userId){ notifyUser('Invalid user'); return; }
+      try{
+        const resp = await fetch(`${API_BASE}/api/users/${encodeURIComponent(userId)}/approve`, {
+          method:'PUT',
+          headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+        });
+        if(!resp.ok) throw new Error(await resp.text().catch(()=>`Approve failed (${resp.status})`));
+        pushNotification('User approved successfully');
+        notifyUser('Store owner/admin approved successfully.', 'success');
+        adminOpenUsers();
+      }catch(err){
+        notifyUser(err.message || 'Failed to approve user.', 'error');
+      }
     }
-    function adminToggleBan(email){
-      const users=getUsers();
-      const idx=users.findIndex(u=>u.email===email); if(idx<0) return;
-      users[idx].banned=!users[idx].banned; setUsers(users); adminOpenUsers();
+    async function adminToggleBan(userId, currentlyActive){
+      if(!userId){ notifyUser('Invalid user'); return; }
+      try{
+        const resp = await fetch(`${API_BASE}/api/users/${encodeURIComponent(userId)}/status?active=${!currentlyActive}`, {
+          method:'PUT',
+          headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+        });
+        if(!resp.ok) throw new Error(await resp.text().catch(()=>`Status update failed (${resp.status})`));
+        notifyUser('User status updated successfully.', 'success');
+        adminOpenUsers();
+      }catch(err){
+        notifyUser(err.message || 'Failed to update user status.', 'error');
+      }
     }
 
     function adminOpenModeration(){
@@ -4240,7 +4348,7 @@
       const maintenance = document.getElementById('setMaint').checked;
       const requireApproval = document.getElementById('setApproval').checked;
       setSystemSettings({ maintenance, requireApproval });
-      alert('Settings saved.');
+      notifyUser('Settings saved.');
       adminOpenSettings();
     }
 
@@ -4329,12 +4437,12 @@
         dealMaxMembers: document.getElementById('npDealMax').value?parseInt(document.getElementById('npDealMax').value):null,
         dealPrice: document.getElementById('npDealPrice').value?parseFloat(document.getElementById('npDealPrice').value):null
       };
-      if(!body.name || isNaN(body.price)) { alert('Name and Price are required'); return; }
+      if(!body.name || isNaN(body.price)) { notifyUser('Name and Price are required'); return; }
       try{
         let store = await ownerApiCall('/store');
         if (store && store.store) store = store.store;
         const storeId = store?.storeId ?? store?.id;
-        if(!storeId){ alert('Owner store not found. Please create your store first.'); return; }
+        if(!storeId){ notifyUser('Owner store not found. Please create your store first.'); return; }
         const resp = await fetch(`${API_BASE}/api/products/store/${storeId}`, { method:'POST', headers:{ 'Content-Type':'application/json', ...(authToken?{'Authorization':`Bearer ${authToken}`}:{}) }, body: JSON.stringify(body)});
         if(!resp.ok){ const t = await resp.text(); throw new Error(t||'Create failed'); }
         closeModal(); await ownerRefreshProducts(); showToast('Product created','success');
@@ -4417,7 +4525,7 @@
         endDate: document.getElementById('ofEnd').value ? new Date(document.getElementById('ofEnd').value).toISOString() : null
       };
       const productId = parseInt(document.getElementById('ofProduct').value);
-      if(!body.title || !productId || isNaN(body.discountPercent) || !body.startDate || !body.endDate) { alert('Please fill required fields'); return; }
+      if(!body.title || !productId || isNaN(body.discountPercent) || !body.startDate || !body.endDate) { notifyUser('Please fill required fields'); return; }
       try{
         const resp = await fetch(`${API_BASE}/api/offers/product/${productId}`, { method:'POST', headers:{ 'Content-Type':'application/json', ...(authToken?{'Authorization':`Bearer ${authToken}`}:{}) }, body: JSON.stringify(body)});
         if(!resp.ok){ const t = await resp.text(); throw new Error(t||'Create offer failed'); }

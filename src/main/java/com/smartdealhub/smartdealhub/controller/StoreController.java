@@ -13,6 +13,7 @@ import com.smartdealhub.smartdealhub.service.NotificationService;
 import com.smartdealhub.smartdealhub.service.StoreHourService;
 import com.smartdealhub.smartdealhub.service.VisitedStoreService;
 import com.smartdealhub.smartdealhub.service.StoreService;
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -50,10 +51,22 @@ public class StoreController {
         this.storeService = storeService;
     }
 
+    private User getCurrentUser(HttpServletRequest request) {
+        Object current = request.getAttribute("currentUser");
+        if (current instanceof User user) {
+            return user;
+        }
+        throw new RuntimeException("Unauthenticated");
+    }
+
+    private boolean isAdmin(User user) {
+        return user != null && user.getRole() == User.Role.ADMIN;
+    }
+
     // ================= CRUD =================
     @PostMapping("/add")
-    public ResponseEntity<?> addStore(@RequestHeader("role") String role, @RequestBody Store store) {
-        if (!"ADMIN".equalsIgnoreCase(role)) {
+    public ResponseEntity<?> addStore(HttpServletRequest request, @RequestBody Store store) {
+        if (!isAdmin(getCurrentUser(request))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only ADMIN can add stores");
         }
         try {
@@ -66,8 +79,8 @@ public class StoreController {
     }
 
     @PutMapping("/update")
-    public ResponseEntity<?> updateStore(@RequestHeader("role") String role, @RequestBody Store store) {
-        if (!"ADMIN".equalsIgnoreCase(role)) {
+    public ResponseEntity<?> updateStore(HttpServletRequest request, @RequestBody Store store) {
+        if (!isAdmin(getCurrentUser(request))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only ADMIN can update stores");
         }
         try {
@@ -80,8 +93,8 @@ public class StoreController {
     }
 
     @DeleteMapping("/delete/{id}")
-    public ResponseEntity<?> deleteStore(@RequestHeader("role") String role, @PathVariable Long id) {
-        if (!"ADMIN".equalsIgnoreCase(role)) {
+    public ResponseEntity<?> deleteStore(HttpServletRequest request, @PathVariable Long id) {
+        if (!isAdmin(getCurrentUser(request))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only ADMIN can delete stores");
         }
         try {
@@ -114,8 +127,12 @@ public class StoreController {
     }
 
     @GetMapping("/all")
-    public List<Store> getAllStores() {
-        return storeService.getAllStores();
+    public ResponseEntity<List<Store>> getAllStores() {
+        try {
+            return ResponseEntity.ok(storeService.getAllStores());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     // ================= Search & Filter =================
@@ -199,7 +216,7 @@ public class StoreController {
 
     // ================= Store Hours =================
     @GetMapping("/id/{storeId}/hours")
-    public List<StoreHour> getStoreHours(@PathVariable int storeId) {
+    public List<StoreHour> getStoreHours(@PathVariable Long storeId) {
         return storeHourService.getStoreHours(storeId);
     }
 
@@ -208,11 +225,11 @@ public class StoreController {
         return storeHourService.getStoreHoursByName(storeName);
     }@PostMapping("/{storeId}/hours/add")
     public ResponseEntity<?> addStoreHour(
-            @RequestHeader("role") String role,
+            HttpServletRequest request,
             @PathVariable Long storeId,
             @RequestBody StoreHour storeHour) {
 
-        if (!"ADMIN".equalsIgnoreCase(role)) {
+        if (!isAdmin(getCurrentUser(request))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("error", "Only ADMIN can add store hours"));
         }
@@ -234,11 +251,11 @@ public class StoreController {
 
     @PutMapping("/{storeId}/hours/update")
     public ResponseEntity<?> updateStoreHour(
-            @RequestHeader("role") String role,
+            HttpServletRequest request,
             @PathVariable Long storeId,
             @RequestBody StoreHour storeHour) {
 
-        if (!"ADMIN".equalsIgnoreCase(role)) {
+        if (!isAdmin(getCurrentUser(request))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("error", "Only ADMIN can update store hours"));
         }
@@ -260,8 +277,8 @@ public class StoreController {
 
     // ================= Notifications =================
     @PostMapping("/notify")
-    public ResponseEntity<?> notifyStoreUsers(@RequestHeader("role") String role, @RequestBody NotificationRequest request) {
-        if (!"ADMIN".equalsIgnoreCase(role)) return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only ADMIN can send notifications");
+    public ResponseEntity<?> notifyStoreUsers(HttpServletRequest httpRequest, @RequestBody NotificationRequest request) {
+        if (!isAdmin(getCurrentUser(httpRequest))) return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only ADMIN can send notifications");
         notificationService.notifyAllUsers(request.getMessage());
         return ResponseEntity.ok("Notifications sent to all users for store ID " + request.getStoreId());
     }

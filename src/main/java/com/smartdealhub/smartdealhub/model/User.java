@@ -1,6 +1,8 @@
 package com.smartdealhub.smartdealhub.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonProperty.Access;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -22,6 +24,7 @@ public class User {
     private String email;
     @JoinColumn(name="password")
     @Column(nullable = false)
+    @JsonProperty(access = Access.WRITE_ONLY)
     private String password;
 
     @JoinColumn(name="phone")
@@ -40,6 +43,9 @@ public class User {
     private boolean loggedIn = false;
     @Column(nullable = false)
     private boolean active = true;
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private ApprovalStatus approvalStatus = ApprovalStatus.APPROVED;
 
     // Relationships
     @OneToMany(mappedBy = "owner", cascade = CascadeType.ALL, orphanRemoval = true)
@@ -86,6 +92,9 @@ public class User {
     public enum Role {
         USER, STORE_OWNER, ADMIN
     }
+    public enum ApprovalStatus {
+        PENDING, APPROVED
+    }
 
     // Constructors
     public User() {}
@@ -119,6 +128,8 @@ public class User {
     public void setLoggedIn(boolean loggedIn) { this.loggedIn = loggedIn; }
     public boolean isActive() { return active; }
     public void setActive(boolean active) { this.active = active; }
+    public ApprovalStatus getApprovalStatus() { return approvalStatus; }
+    public void setApprovalStatus(ApprovalStatus approvalStatus) { this.approvalStatus = approvalStatus; }
     public List<Store> getStores() { return stores; }
     public void setStores(List<Store> stores) { this.stores = stores; }
     public List<Review> getReviews() { return reviews; }

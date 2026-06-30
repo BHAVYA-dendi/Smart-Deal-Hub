@@ -43,6 +43,12 @@ public class UserController {
     @Autowired
     private UserRepository userRepository;
 
+    private User requireCurrentUser(HttpServletRequest request) {
+        Object cu = request.getAttribute("currentUser");
+        if (cu instanceof User user) return user;
+        throw new RuntimeException("Unauthenticated");
+    }
+
     // ==============================
     // USER ACCOUNT MANAGEMENT
     // ==============================
@@ -71,6 +77,8 @@ public class UserController {
             out.put("email", user.getEmail());
             out.put("name", user.getName());
             out.put("role", user.getRole()!=null? user.getRole().name(): null);
+            out.put("approvalStatus", user.getApprovalStatus() != null ? user.getApprovalStatus().name() : null);
+            out.put("active", user.isActive());
             return ResponseEntity.ok(out);
         }catch(Exception e){
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
@@ -97,7 +105,10 @@ public class UserController {
 
             // Validate required fields
             if (email == null || password == null || name == null) {
-                return ResponseEntity.badRequest().body("name, email, password are required");
+                return ResponseEntity.badRequest().body("Name, email, and password are required");
+            }
+            if (password.isBlank()) {
+                return ResponseEntity.badRequest().body("Password is required");
             }
             if (userRepository.existsByEmail(email)) {
                 return ResponseEntity.badRequest().body("Email already registered");
@@ -112,20 +123,30 @@ public class UserController {
                     String.join(", ", java.util.Arrays.stream(Role.values()).map(Enum::name).toList()));
             }
 
+            if (role == Role.ADMIN) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body("Use /api/users/register/admin for admin signup");
+            }
+            if (role == Role.STORE_OWNER) {
+                return ResponseEntity.badRequest()
+                        .body("Use /api/users/register/storeowner for store owner registration");
+            }
+
             // Create and save user
             User user = new User();
             user.setName(name);
             user.setEmail(email);
-            user.setPassword(password); // Note: Password should be encoded in production
+            user.setPassword(password);
             user.setPhone(phone);
             user.setRole(role);
+            user.setApprovalStatus(User.ApprovalStatus.APPROVED);
             user.setCreatedAt(LocalDateTime.now());
-            User savedUser = userRepository.save(user);
+            User savedUser = userService.addUser(user);
 
             // Prepare response
             Map<String, Object> response = new HashMap<>();
             response.put("user", savedUser);
-            response.put("token", JwtUtil.generateToken(savedUser.getEmail()));
+            response.put("token", JwtUtil.generateToken(savedUser.getEmail(), savedUser.getRole().name()));
 
             // Handle store owner registration
             if (role == Role.STORE_OWNER) {
@@ -187,6 +208,15 @@ public class UserController {
     }
     @PostMapping("/register/storeowner")
     public ResponseEntity<?> registerStoreOwner(@RequestBody StoreOwnerRegistrationRequest request) {
+        if (request.getEmail() == null || request.getEmail().isBlank()) {
+            return ResponseEntity.badRequest().body("Email is required");
+        }
+        if (request.getPassword() == null || request.getPassword().isBlank()) {
+            return ResponseEntity.badRequest().body("Password is required");
+        }
+        if (request.getName() == null || request.getName().isBlank()) {
+            return ResponseEntity.badRequest().body("Name is required");
+        }
         if (userRepository.existsByEmail(request.getEmail())) {
             return ResponseEntity.badRequest().body("Email already registered");
         }
@@ -205,6 +235,7 @@ public class UserController {
         user.setPassword(request.getPassword());
         user.setPhone(request.getPhone());
         user.setRole(Role.STORE_OWNER);
+        user.setApprovalStatus(User.ApprovalStatus.PENDING);
         user.setCreatedAt(java.time.LocalDateTime.now());
         User savedUser = userService.addUser(user);
 
@@ -222,24 +253,40 @@ public class UserController {
         store.setLongitude(request.getLongitude());
         Store savedStore = storeService.createStore(store, savedUser.getUserId());
 
-        // Optional: issue token immediately
-        String token = JwtUtil.generateToken(savedUser.getEmail());
-
         return ResponseEntity.ok(java.util.Map.of(
                 "user", savedUser,
                 "store", savedStore,
-                "token", token
+                "message", "Store owner registration submitted. Await admin approval."
         ));
     }
 
     @PostMapping("/register/admin")
-    public ResponseEntity<User> registerAdmin(@RequestBody User user) {
-        return ResponseEntity.ok(userService.registerUser(user, Role.ADMIN));
+    public ResponseEntity<?> registerAdmin(@RequestBody User user) {
+        if (user.getEmail() == null || user.getEmail().isBlank()) {
+            return ResponseEntity.badRequest().body("Email is required");
+        }
+        if (user.getPassword() == null || user.getPassword().isBlank()) {
+            return ResponseEntity.badRequest().body("Password is required");
+        }
+        if (user.getName() == null || user.getName().isBlank()) {
+            return ResponseEntity.badRequest().body("Name is required");
+        }
+        if (userRepository.existsByEmail(user.getEmail())) {
+            return ResponseEntity.badRequest().body("Email already registered");
+        }
+        User saved = userService.registerUser(user, Role.ADMIN);
+        Map<String, Object> out = new HashMap<>();
+        out.put("userId", saved.getUserId());
+        out.put("email", saved.getEmail());
+        out.put("role", saved.getRole().name());
+        out.put("approvalStatus", saved.getApprovalStatus().name());
+        out.put("message", "Admin registration submitted. Await approval from an existing admin.");
+        return ResponseEntity.ok(out);
     }
 
     @PostMapping("/login") public ResponseEntity<Map<String,Object>> login(@RequestBody LoginRequest loginRequest) {
         User user = userService.login(loginRequest.getEmail(), loginRequest.getPassword());
-        String token = JwtUtil.generateToken(user.getEmail());
+        String token = JwtUtil.generateToken(user.getEmail(), user.getRole().name());
         // Log user login activity
         activityService.recordActivity(loginRequest.getEmail(),
                 UserActivity.ActivityType.LOGIN,
@@ -260,7 +307,11 @@ public class UserController {
         // Build response without Map.of because it does not allow null values
         Map<String, Object> resp = new HashMap<>();
         resp.put("token", token);
+        resp.put("userId", user.getUserId());
+        resp.put("email", user.getEmail());
+        resp.put("name", user.getName());
         resp.put("role", user.getRole().name());
+        resp.put("approvalStatus", user.getApprovalStatus().name());
         resp.put("needStoreSetup", needStoreSetup);
         if (storeId != null) {
             resp.put("storeId", storeId);
@@ -269,7 +320,11 @@ public class UserController {
     }
 
     @PostMapping("/logout/{userId}")
-    public ResponseEntity<String> logout(@PathVariable Long userId) {
+    public ResponseEntity<String> logout(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         userService.logout(userId);
         User user = userService.getUserById(userId);
         // Log user logout activity
@@ -284,18 +339,36 @@ public class UserController {
     @PutMapping("/change-password/{userId}")
     public ResponseEntity<String> changePassword(
             @PathVariable Long userId,
-            @RequestBody ChangePasswordRequest request) {
+            @RequestBody ChangePasswordRequest request,
+            HttpServletRequest httpRequest) {
+        User current = requireCurrentUser(httpRequest);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         userService.changePassword(userId, request.getPassword(), request.getNewPassword());
         return ResponseEntity.ok("Password changed successfully");
     }
 
     @PutMapping("/{userId}")
-    public ResponseEntity<User> updateUserProfile(@PathVariable Long userId, @RequestBody User updatedUser) {
+    public ResponseEntity<User> updateUserProfile(@PathVariable Long userId, @RequestBody User updatedUser, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        User existing = userService.getUserById(userId);
+        if (current.getRole() != Role.ADMIN) {
+            updatedUser.setRole(existing.getRole());
+        }
+        updatedUser.setPassword(null);
         return ResponseEntity.ok(userService.updateUser(userId, updatedUser));
     }
 
     @DeleteMapping("/{userId}")
-    public ResponseEntity<String> deleteUser(@PathVariable Long userId) {
+    public ResponseEntity<String> deleteUser(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         userService.deleteUser(userId);
         return ResponseEntity.ok("User deleted successfully");
     }
@@ -305,17 +378,29 @@ public class UserController {
     // ==============================
 
     @GetMapping("/{userId}/activity")
-    public ResponseEntity<List<UserActivity>> getUserActivity(@PathVariable Long userId) {
+    public ResponseEntity<List<UserActivity>> getUserActivity(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return ResponseEntity.ok(activityService.getActivitiesByUserId(userId));
     }
 
     @GetMapping("/{userId}/visited-stores")
-    public ResponseEntity<List<Store>> getVisitedStores(@PathVariable Long userId) {
+    public ResponseEntity<List<Store>> getVisitedStores(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return ResponseEntity.ok(visitedStoreService.getVisitedStoresByUser(userId));
     }
 
     @PostMapping("/{userId}/visit-store/{storeId}")
-    public ResponseEntity<String> addVisitedStore(@PathVariable Long userId, @PathVariable Long storeId) {
+    public ResponseEntity<String> addVisitedStore(@PathVariable Long userId, @PathVariable Long storeId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         visitedStoreService.addVisit(userId, storeId);
         // Log visit activity
         activityService.recordActivity(userId,
@@ -331,7 +416,11 @@ public class UserController {
     // ==============================
 
     @GetMapping
-    public ResponseEntity<List<Map<String,Object>>> getAllUsers() {
+    public ResponseEntity<List<Map<String,Object>>> getAllUsers(HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || currentUser.getRole() != Role.ADMIN) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         List<User> list = userService.getAllUsers();
         List<Map<String,Object>> summaries = list.stream().map(u -> {
             Map<String,Object> m = new HashMap<>();
@@ -340,24 +429,71 @@ public class UserController {
             m.put("name", u.getName());
             m.put("role", u.getRole()!=null? u.getRole().name(): null);
             m.put("loggedIn", u.isLoggedIn());
+            m.put("active", u.isActive());
+            m.put("approvalStatus", u.getApprovalStatus() != null ? u.getApprovalStatus().name() : null);
             return m;
         }).toList();
         return ResponseEntity.ok(summaries);
     }
 
+    @GetMapping("/pending")
+    public ResponseEntity<List<Map<String, Object>>> getPendingUsers(HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || currentUser.getRole() != Role.ADMIN) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        List<Map<String, Object>> out = userService.getPendingApprovals().stream().map(u -> {
+            Map<String, Object> row = new HashMap<>();
+            row.put("userId", u.getUserId());
+            row.put("name", u.getName());
+            row.put("email", u.getEmail());
+            row.put("role", u.getRole().name());
+            row.put("approvalStatus", u.getApprovalStatus().name());
+            return row;
+        }).toList();
+        return ResponseEntity.ok(out);
+    }
+
+    @PutMapping("/{userId}/approve")
+    public ResponseEntity<Map<String, Object>> approveUser(@PathVariable Long userId, HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || currentUser.getRole() != Role.ADMIN) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        User approved = userService.approveUser(userId);
+        Map<String, Object> out = new HashMap<>();
+        out.put("userId", approved.getUserId());
+        out.put("role", approved.getRole().name());
+        out.put("approvalStatus", approved.getApprovalStatus().name());
+        out.put("message", "User approved successfully");
+        return ResponseEntity.ok(out);
+    }
+
     @GetMapping("/{userId}")
-    public ResponseEntity<User> getUserById(@PathVariable Long userId) {
+    public ResponseEntity<User> getUserById(@PathVariable Long userId, HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || (currentUser.getRole() != Role.ADMIN && !currentUser.getUserId().equals(userId))) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return ResponseEntity.ok(userService.getUserById(userId));
     }
 
     @PutMapping("/{userId}/role")
-    public ResponseEntity<String> updateUserRole(@PathVariable Long userId, @RequestBody Role role) {
+    public ResponseEntity<String> updateUserRole(@PathVariable Long userId, @RequestBody Role role, HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || currentUser.getRole() != Role.ADMIN) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         userService.updateUserRole(userId, Role.valueOf(role.name()));
         return ResponseEntity.ok("User role updated successfully");
     }
 
     @PutMapping("/{userId}/status")
-    public ResponseEntity<String> toggleUserStatus(@PathVariable Long userId, @RequestParam boolean active) {
+    public ResponseEntity<String> toggleUserStatus(@PathVariable Long userId, @RequestParam boolean active, HttpServletRequest request) {
+        User currentUser = (User) request.getAttribute("currentUser");
+        if (currentUser == null || currentUser.getRole() != Role.ADMIN) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         userService.setUserActiveStatus(userId, active);
         return ResponseEntity.ok(active ? "User activated" : "User deactivated");
     }
@@ -367,12 +503,20 @@ public class UserController {
     // ==============================
 
     @GetMapping("/{userId}/store-visitors")
-    public ResponseEntity<List<User>> getStoreVisitors(@PathVariable Long userId) {
+    public ResponseEntity<List<User>> getStoreVisitors(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return ResponseEntity.ok(visitedStoreService.getVisitorsForOwnerStores(userId));
     }
 
     @GetMapping("/{userId}/store-analytics")
-    public ResponseEntity<StoreAnalyticsResponse> getStoreAnalytics(@PathVariable Long userId) {
+    public ResponseEntity<StoreAnalyticsResponse> getStoreAnalytics(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (current.getRole() != Role.ADMIN && !current.getUserId().equals(userId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return ResponseEntity.ok((StoreAnalyticsResponse) userService.getStoreAnalytics(userId));
     }
 }

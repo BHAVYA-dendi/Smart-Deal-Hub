@@ -2,7 +2,9 @@ package com.smartdealhub.smartdealhub.controller;
 
 import com.smartdealhub.smartdealhub.model.*;
 import com.smartdealhub.smartdealhub.repository.GroupDealRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import com.smartdealhub.smartdealhub.service.GroupDealService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -47,6 +49,21 @@ public class GroupDealController {
         this.groupDealService = groupDealService;
         this.groupDealRepository = groupDealRepository;
     }
+
+    private User requireCurrentUser(HttpServletRequest request) {
+        Object cu = request.getAttribute("currentUser");
+        if (cu instanceof User user) return user;
+        throw new RuntimeException("Unauthenticated");
+    }
+
+    private boolean canAccessUser(User current, Long userId) {
+        return current.getRole() == User.Role.ADMIN || current.getUserId().equals(userId);
+    }
+
+    private boolean canModerateDeal(User current, GroupDeal deal) {
+        if (current.getRole() == User.Role.ADMIN) return true;
+        return deal.getInitiator() != null && current.getUserId().equals(deal.getInitiator().getUserId());
+    }
     
     // Remove the second constructor to avoid initialization issues
     // public GroupDealController(GroupDealService groupDealService) {
@@ -56,8 +73,10 @@ public class GroupDealController {
 
     // Create a deal (user-only minimal payload) — return lightweight summary to avoid deep recursion
     @PostMapping("/create")
-    public ResponseEntity<Map<String, Object>> createDeal(@RequestBody Map<String,Object> body) {
+    public ResponseEntity<Map<String, Object>> createDeal(@RequestBody Map<String,Object> body, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            body.put("initiatorId", current.getUserId());
             // Ensure the creator is automatically added as a member
             GroupDeal deal = groupDealService.createGroupDeal(body);
             
@@ -137,21 +156,29 @@ public class GroupDealController {
 
     // Update deal
     @PatchMapping("/update/{id}")
-    public ResponseEntity<GroupDeal> updateDeal(@PathVariable Long id, @RequestBody GroupDeal deal) {
+    public ResponseEntity<GroupDeal> updateDeal(@PathVariable Long id, @RequestBody GroupDeal deal, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        GroupDeal existing = groupDealService.getDealById(id);
+        if (!canModerateDeal(current, existing)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         return ResponseEntity.ok(groupDealService.updateGroupDeal(id, deal));
     }
 
     // Delete deal
     @DeleteMapping("/delete/{id}")
-    public ResponseEntity<String> deleteDeal(@PathVariable Long id) {
+    public ResponseEntity<String> deleteDeal(@PathVariable Long id, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        GroupDeal existing = groupDealService.getDealById(id);
+        if (!canModerateDeal(current, existing)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         groupDealService.deleteGroupDeal(id);
         return ResponseEntity.ok("Deal deleted successfully");
     }
 
     // Get all joinable deals for a user (not created by user and not already joined)
     @GetMapping("/joinable/{userId}")
-    public ResponseEntity<List<Map<String, Object>>> getJoinableDeals(@PathVariable Long userId) {
+    public ResponseEntity<List<Map<String, Object>>> getJoinableDeals(@PathVariable Long userId, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             // Get all active deals
             List<GroupDeal> allDeals = groupDealService.getAllDeals();
             
@@ -218,8 +245,11 @@ public class GroupDealController {
     @PostMapping("/{dealId}/join")
     public ResponseEntity<Map<String, Object>> joinDeal(
             @PathVariable Long dealId, 
-            @RequestParam Long userId) {
+            @RequestParam Long userId,
+            HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             // Check if user has already joined this deal using service layer
             GroupDeal deal = groupDealService.getDealById(dealId);
             boolean alreadyJoined = deal.getMembers() != null && 
@@ -262,7 +292,9 @@ public class GroupDealController {
 
     // Leave deal
     @PostMapping("/{dealId}/leave")
-    public ResponseEntity<String> leaveDeal(@PathVariable Long dealId, @RequestParam Long userId) {
+    public ResponseEntity<String> leaveDeal(@PathVariable Long dealId, @RequestParam Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         groupDealService.leaveGroupDeal(dealId, userId);
         return ResponseEntity.ok("Left deal successfully");
     }
@@ -282,8 +314,10 @@ public class GroupDealController {
 
     // Get all deals for a specific user from group_members with role info
     @GetMapping("/user/{userId}/all")
-    public ResponseEntity<List<Map<String, Object>>> getAllDealsForUser(@PathVariable Long userId) {
+    public ResponseEntity<List<Map<String, Object>>> getAllDealsForUser(@PathVariable Long userId, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             // Fetch deals the user joined (group_members)
             List<GroupDeal> joined = new ArrayList<>();
             try { joined = groupDealService.getDealsJoinedByUser(userId); } catch (Exception ignored) {}
@@ -358,19 +392,25 @@ public class GroupDealController {
 
     // Get deals created by a specific user
     @GetMapping("/user/{userId}")
-    public ResponseEntity<List<GroupDeal>> getDealsByUser(@PathVariable Long userId) {
+    public ResponseEntity<List<GroupDeal>> getDealsByUser(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         return ResponseEntity.ok(groupDealService.getDealsByUser(userId));
     }
 
     // Get deals joined by a specific user
     @GetMapping("/joined/{userId}")
-    public ResponseEntity<List<GroupDeal>> getDealsJoinedByUser(@PathVariable Long userId) {
+    public ResponseEntity<List<GroupDeal>> getDealsJoinedByUser(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         return ResponseEntity.ok(groupDealService.getDealsJoinedByUser(userId));
     }
 
     // Test endpoint to verify API is working
     @GetMapping("/test/{userId}")
-    public ResponseEntity<Map<String, Object>> testUserEndpoint(@PathVariable Long userId) {
+    public ResponseEntity<Map<String, Object>> testUserEndpoint(@PathVariable Long userId, HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         Map<String, Object> response = new HashMap<>();
         response.put("message", "API is working");
         response.put("userId", userId);
@@ -417,11 +457,14 @@ public class GroupDealController {
 
     // Approve member join request - updates group_member table
     @PostMapping("/{dealId}/approve/{userId}")
-    public ResponseEntity<Map<String, Object>> approveMember(@PathVariable Long dealId, @PathVariable Long userId) {
+    public ResponseEntity<Map<String, Object>> approveMember(@PathVariable Long dealId, @PathVariable Long userId, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            GroupDeal deal = groupDealService.getDealById(dealId);
+            if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             GroupMember approvedMember = groupDealService.approveMember(dealId, userId);
 
-            GroupDeal deal = groupDealService.getDealById(dealId);
+            deal = groupDealService.getDealById(dealId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Member approved successfully");
@@ -443,11 +486,14 @@ public class GroupDealController {
 
     // Reject member join request - removes from group_member table
     @PostMapping("/{dealId}/reject/{userId}")
-    public ResponseEntity<Map<String, Object>> rejectMember(@PathVariable Long dealId, @PathVariable Long userId) {
+    public ResponseEntity<Map<String, Object>> rejectMember(@PathVariable Long dealId, @PathVariable Long userId, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            GroupDeal deal = groupDealService.getDealById(dealId);
+            if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             groupDealService.rejectMember(dealId, userId);
 
-            GroupDeal deal = groupDealService.getDealById(dealId);
+            deal = groupDealService.getDealById(dealId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Member rejected and removed from deal");
@@ -465,8 +511,11 @@ public class GroupDealController {
 
     // Get pending join requests for a deal (for creator approval)
     @GetMapping("/{dealId}/pending")
-    public ResponseEntity<List<Map<String, Object>>> getPendingRequests(@PathVariable Long dealId) {
+    public ResponseEntity<List<Map<String, Object>>> getPendingRequests(@PathVariable Long dealId, HttpServletRequest request) {
         try {
+            User current = requireCurrentUser(request);
+            GroupDeal deal = groupDealService.getDealById(dealId);
+            if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             List<User> pendingUsers = groupDealService.getPendingMembers(dealId);
 
             List<Map<String, Object>> dto = pendingUsers.stream().map(user -> {
