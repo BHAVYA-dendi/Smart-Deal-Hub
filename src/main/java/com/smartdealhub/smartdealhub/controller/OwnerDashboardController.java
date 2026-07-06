@@ -32,6 +32,9 @@ public class OwnerDashboardController {
         if (user.getRole() != User.Role.STORE_OWNER && user.getRole() != User.Role.ADMIN) {
             throw new RuntimeException("Forbidden: not a store owner");
         }
+        if (user.getApprovalStatus() != User.ApprovalStatus.APPROVED) {
+            throw new RuntimeException("Account is pending approval");
+        }
         return user;
     }
 
@@ -164,15 +167,11 @@ public class OwnerDashboardController {
                 return ResponseEntity.ok(Collections.emptyList());
             }
 
-            // Get all group deals for these products with members loaded
+            // Get all group deals for these products with members loaded (optimized)
             List<GroupDeal> deals = new ArrayList<>();
             for (Long pid : productIds) {
-                List<GroupDeal> productDeals = groupDealRepository.findByProductId(pid);
-                // Load members for each deal to get accurate count
-                for (GroupDeal deal : productDeals) {
-                    GroupDeal fullDeal = groupDealRepository.findByIdWithMembers(deal.getId()).orElse(deal);
-                    deals.add(fullDeal);
-                }
+                List<GroupDeal> productDeals = groupDealRepository.findByProductIdWithMembers(pid);
+                deals.addAll(productDeals);
             }
 
             // Convert to DTO to avoid circular references

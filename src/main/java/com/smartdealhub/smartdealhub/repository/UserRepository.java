@@ -11,7 +11,9 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByEmail(String email);
 
-    List<User> findByRole(String role);
+    List<User> findByRole(User.Role role);
+    long countByRoleAndApprovalStatus(User.Role role, User.ApprovalStatus approvalStatus);
+    List<User> findByApprovalStatus(User.ApprovalStatus approvalStatus);
 
     @Query("SELECT u FROM User u WHERE u.name LIKE %:name%")
     List<User> searchByName(String name);

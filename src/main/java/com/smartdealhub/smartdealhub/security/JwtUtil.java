@@ -6,22 +6,30 @@ import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
 
 import java.security.Key;
+import java.nio.charset.StandardCharsets;
 import java.util.Date;
 
 public class JwtUtil {
 
-    private static final Key SECRET_KEY = Keys.secretKeyFor(SignatureAlgorithm.HS256); // securely generated key
+    private static final String DEFAULT_SECRET = "smartdealhub-default-jwt-secret-change-in-production-2026";
+    private static final String RAW_SECRET = System.getenv().getOrDefault("JWT_SECRET", DEFAULT_SECRET);
+    private static final Key SECRET_KEY = Keys.hmacShaKeyFor(RAW_SECRET.getBytes(StandardCharsets.UTF_8));
     private static final long EXPIRATION_TIME_MS = 1000 * 60 * 60; // 1 hour
 
     // Generate JWT token
-    public static String generateToken(String email) {
+    public static String generateToken(String email, String role) {
         long now = System.currentTimeMillis();
         return Jwts.builder()
                 .setSubject(email)
+                .claim("role", role)
                 .setIssuedAt(new Date(now))
                 .setExpiration(new Date(now + EXPIRATION_TIME_MS))
                 .signWith(SECRET_KEY)
                 .compact();
+    }
+
+    public static String generateToken(String email) {
+        return generateToken(email, "USER");
     }
 
     // Validate JWT token
@@ -46,6 +54,20 @@ public class JwtUtil {
                     .parseClaimsJws(token)
                     .getBody();
             return claims.getSubject();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static String getRoleFromToken(String token) {
+        try {
+            Claims claims = Jwts.parserBuilder()
+                    .setSigningKey(SECRET_KEY)
+                    .build()
+                    .parseClaimsJws(token)
+                    .getBody();
+            Object role = claims.get("role");
+            return role != null ? role.toString() : null;
         } catch (Exception e) {
             return null;
         }

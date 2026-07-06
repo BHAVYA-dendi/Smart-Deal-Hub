@@ -3,6 +3,7 @@ package com.smartdealhub.smartdealhub;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdealhub.smartdealhub.dto.LoginRequest;
 import com.smartdealhub.smartdealhub.model.User;
+import com.smartdealhub.smartdealhub.repository.UserActivityRepository;
 import com.smartdealhub.smartdealhub.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,9 @@ class AuthFlowIntegrationTest {
     private MockMvc mockMvc;
 
     @Autowired
+    private UserActivityRepository userActivityRepository;
+
+    @Autowired
     private UserRepository userRepository;
 
     @Autowired
@@ -41,7 +45,22 @@ class AuthFlowIntegrationTest {
 
     @BeforeEach
     void cleanUsers() {
+        userActivityRepository.deleteAll();
         userRepository.deleteAll();
+    }
+
+    @Test
+    void adminRegistrationAcceptsPasswordInRequestBody() throws Exception {
+        String body = """
+                {"name":"New Admin","email":"newadmin@test.com","password":"Admin@456"}
+                """;
+
+        mockMvc.perform(post("/api/users/register/admin")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.approvalStatus").value("PENDING"))
+                .andExpect(jsonPath("$.role").value("ADMIN"));
     }
 
     @Test

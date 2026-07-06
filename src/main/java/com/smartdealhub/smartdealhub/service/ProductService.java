@@ -69,25 +69,29 @@ public class ProductService {
     // ================= USER FEATURES =================
 
     public List<Product> getAllProducts() {
-        return productRepository.findAll();
+        return productRepository.findAllWithStore();
     }
 
     public Product getProductById(Long productId) {
-        return productRepository.findById(productId)
+        return productRepository.findByIdWithStore(productId)
+                .or(() -> productRepository.findById(productId))
                 .orElseThrow(() -> new RuntimeException("Product not found with ID: " + productId));
     }
 
     public List<Product> searchProductsByName(String query) {
-        return productRepository.findByNameContainingIgnoreCase(query);
+        if (query == null || query.isBlank()) {
+            return getAllProducts();
+        }
+        return productRepository.searchByNameWithStore(query.trim());
     }
 
     public List<Product> filterProducts(String category, String brand) {
         if (category != null && brand != null) {
-            return productRepository.findByCategoryAndBrand(category, brand);
+            return productRepository.findByCategoryAndBrandWithStore(category, brand);
         } else if (category != null) {
-            return productRepository.findByCategory(category);
+            return productRepository.findByCategoryWithStore(category);
         } else if (brand != null) {
-            return productRepository.findByBrand(brand);
+            return productRepository.findByBrandWithStore(brand);
         } else {
             return getAllProducts();
         }
@@ -123,21 +127,23 @@ public class ProductService {
 
     public ProductPriceComparisonResponse comparePrices(Long productId, String storeType, Double minPrice, Double maxPrice) {
         Product product = getProductById(productId);
-        List<Product> products = productRepository.findAll();
+        return compareProductsByName(product.getName(), storeType, minPrice, maxPrice);
+    }
 
-        // Filter by same product name
-        products = products.stream()
-                .filter(p -> p.getName().equalsIgnoreCase(product.getName()))
-                .collect(Collectors.toList());
+    public ProductPriceComparisonResponse compareProductsByName(String name, String storeType, Double minPrice, Double maxPrice) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("Product name is required");
+        }
+        List<Product> products = productRepository.searchByNameWithStore(name.trim());
 
-        // Filter by store type if specified
-        if (!"BOTH".equalsIgnoreCase(storeType)) {
+        if (!"BOTH".equalsIgnoreCase(storeType != null ? storeType : "BOTH")) {
+            String type = storeType.toUpperCase();
             products = products.stream()
-                    .filter(p -> p.getStore() != null && storeType.equalsIgnoreCase(p.getStore().getStoreType().name()))
+                    .filter(p -> p.getStore() != null && p.getStore().getStoreType() != null
+                            && type.equalsIgnoreCase(p.getStore().getStoreType().name()))
                     .collect(Collectors.toList());
         }
 
-        // Filter by price range
         if (minPrice != null) {
             products = products.stream()
                     .filter(p -> p.getPrice() != null && p.getPrice().compareTo(BigDecimal.valueOf(minPrice)) >= 0)
@@ -149,19 +155,21 @@ public class ProductService {
                     .collect(Collectors.toList());
         }
 
-        // Prepare response
-        List<RouteStep> steps = products.stream()
-                .map(p -> new RouteStep(p.getId(), p.getName(),
-                        p.getStore() != null ? p.getStore().getLatitude() : 0,
-                        p.getStore() != null ? p.getStore().getLongitude() : 0,
-                        p.getPrice().doubleValue()))
+        List<ProductComparisonItem> items = products.stream()
+                .filter(p -> p.getPrice() != null)
+                .map(p -> new ProductComparisonItem(
+                        p.getId(),
+                        p.getName(),
+                        p.getPrice().doubleValue(),
+                        p.getStore() != null ? p.getStore().getName() : "Unknown",
+                        p.getStore() != null ? p.getStore().getStoreType().name() : "UNKNOWN",
+                        p.getStore() != null ? p.getStore().getCity() : "",
+                        p.getStore() != null ? p.getStore().getState() : "",
+                        p.getStore() != null ? p.getStore().getLatitude() : null,
+                        p.getStore() != null ? p.getStore().getLongitude() : null
+                ))
                 .collect(Collectors.toList());
 
-        String routePath = products.stream()
-                .map(p -> "Store " + (p.getStore() != null ? p.getStore().getName() : "Unknown"))
-                .reduce((a, b) -> a + " -> " + b)
-                .orElse("No stores");
-
-        return new ProductPriceComparisonResponse(routePath, steps);
+        return new ProductPriceComparisonResponse(name, items);
     }
 }

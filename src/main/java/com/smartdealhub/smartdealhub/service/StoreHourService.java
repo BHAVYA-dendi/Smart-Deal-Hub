@@ -14,7 +14,7 @@ public class StoreHourService {
     private final StoreHourRepository storeHourRepository;
 
     // Get hours by store ID
-    public List<StoreHour> getStoreHours(int storeId) {
+    public List<StoreHour> getStoreHours(Long storeId) {
         return storeHourRepository.findByStoreStoreId(storeId);
     }
 

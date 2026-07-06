@@ -25,4 +25,29 @@ public interface GroupDealRepository extends JpaRepository<GroupDeal, Long> {
            "LEFT JOIN FETCH m.user " +
            "WHERE gd.id = :dealId")
     Optional<GroupDeal> findByIdWithMembers(@Param("dealId") Long dealId);
+
+    // Find deals by initiator with members and product to avoid N+1
+    @Query("SELECT DISTINCT gd FROM GroupDeal gd " +
+           "LEFT JOIN FETCH gd.members m " +
+           "LEFT JOIN FETCH gd.product p " +
+           "LEFT JOIN FETCH p.store " +
+           "WHERE gd.initiator.userId = :userId")
+    List<GroupDeal> findByInitiator_UserIdWithDetails(@Param("userId") Long userId);
+
+    // Find deals by user membership with product and store to avoid N+1
+    @Query("SELECT DISTINCT gd FROM GroupDeal gd " +
+           "LEFT JOIN FETCH gd.members m " +
+           "LEFT JOIN FETCH gd.product p " +
+           "LEFT JOIN FETCH p.store " +
+           "LEFT JOIN FETCH m.user u " +
+           "WHERE u.userId = :userId")
+    List<GroupDeal> findByMembersUserUserIdWithDetails(@Param("userId") Long userId);
+
+    // Find deals by product with members to avoid N+1
+    @Query("SELECT DISTINCT gd FROM GroupDeal gd " +
+           "LEFT JOIN FETCH gd.members m " +
+           "LEFT JOIN FETCH m.user " +
+           "LEFT JOIN FETCH gd.product p " +
+           "WHERE p.id = :productId")
+    List<GroupDeal> findByProductIdWithMembers(@Param("productId") Long productId);
 }

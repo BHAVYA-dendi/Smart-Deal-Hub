@@ -2,6 +2,7 @@ package com.smartdealhub.smartdealhub.controller;
 
 import com.smartdealhub.smartdealhub.model.*;
 import com.smartdealhub.smartdealhub.repository.GroupDealRepository;
+import com.smartdealhub.smartdealhub.repository.GroupMemberRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import com.smartdealhub.smartdealhub.service.GroupDealService;
 import org.springframework.http.HttpStatus;
@@ -44,10 +45,14 @@ public class GroupDealController {
 
     private final GroupDealService groupDealService;
     private final GroupDealRepository groupDealRepository;
+    private final GroupMemberRepository groupMemberRepository;
 
-    public GroupDealController(GroupDealService groupDealService, GroupDealRepository groupDealRepository) {
+    public GroupDealController(GroupDealService groupDealService,
+                               GroupDealRepository groupDealRepository,
+                               GroupMemberRepository groupMemberRepository) {
         this.groupDealService = groupDealService;
         this.groupDealRepository = groupDealRepository;
+        this.groupMemberRepository = groupMemberRepository;
     }
 
     private User requireCurrentUser(HttpServletRequest request) {
@@ -64,6 +69,75 @@ public class GroupDealController {
         if (current.getRole() == User.Role.ADMIN) return true;
         return deal.getInitiator() != null && current.getUserId().equals(deal.getInitiator().getUserId());
     }
+
+    private Map<String, Object> buildDealDto(GroupDeal deal, Long viewerUserId) {
+        long totalMembers = groupMemberRepository.countByDeal_Id(deal.getId());
+        long approvedMembers = groupMemberRepository.countByDeal_IdAndApprovedTrue(deal.getId());
+        long pendingMembers = groupMemberRepository.countByDeal_IdAndApprovedFalse(deal.getId());
+
+        boolean isCreator = deal.getInitiator() != null && deal.getInitiator().getUserId() != null
+                && viewerUserId != null && deal.getInitiator().getUserId().equals(viewerUserId);
+        Long creatorId = deal.getInitiator() != null ? deal.getInitiator().getUserId() : null;
+
+        Integer maxMembers = deal.getMaxMembers();
+        if (maxMembers == null && deal.getProduct() != null) {
+            maxMembers = deal.getProduct().getDealMaxMembers();
+        }
+
+        String membershipStatus = "NONE";
+        if (viewerUserId != null) {
+            Optional<GroupMember> membership = groupMemberRepository.findByDeal_IdAndUser_UserId(deal.getId(), viewerUserId);
+            if (membership.isPresent()) {
+                membershipStatus = membership.get().isApproved() ? "APPROVED" : "PENDING";
+            }
+        }
+
+        Map<String, Object> m = new HashMap<>();
+        m.put("id", deal.getId());
+        m.put("productId", deal.getProduct() != null ? deal.getProduct().getId() : null);
+        m.put("productName", deal.getProduct() != null ? deal.getProduct().getName() : null);
+        m.put("memberCount", (int) totalMembers);
+        m.put("currentMembers", (int) approvedMembers);
+        m.put("pendingMembers", (int) pendingMembers);
+        m.put("maxMembers", maxMembers != null ? maxMembers : 10);
+        m.put("status", deal.getStatus());
+        m.put("createdAt", deal.getCreatedAt());
+        m.put("creatorId", creatorId);
+        m.put("isCreator", isCreator);
+        m.put("isMember", !"NONE".equals(membershipStatus));
+        m.put("membershipStatus", membershipStatus);
+        m.put("userRole", isCreator ? "CREATOR" : ("APPROVED".equals(membershipStatus) || "PENDING".equals(membershipStatus) ? "MEMBER" : "NONE"));
+        if (deal.getDealPrice() != null) {
+            m.put("dealPrice", deal.getDealPrice());
+        }
+        if (deal.getDiscountPercent() != null) {
+            m.put("dealDiscount", deal.getDiscountPercent());
+        }
+        return m;
+    }
+
+    private void putMemberCounts(Map<String, Object> m, Long dealId) {
+        m.put("memberCount", (int) groupMemberRepository.countByDeal_Id(dealId));
+        m.put("currentMembers", (int) groupMemberRepository.countByDeal_IdAndApprovedTrue(dealId));
+        m.put("pendingMembers", (int) groupMemberRepository.countByDeal_IdAndApprovedFalse(dealId));
+    }
+
+    private Map<String, Object> buildJoinableDealDto(GroupDeal deal) {
+        long totalMembers = groupMemberRepository.countByDeal_Id(deal.getId());
+        long approvedMembers = groupMemberRepository.countByDeal_IdAndApprovedTrue(deal.getId());
+
+        Map<String, Object> dealInfo = new HashMap<>();
+        dealInfo.put("id", deal.getId());
+        dealInfo.put("title", deal.getTitle());
+        dealInfo.put("description", deal.getDescription());
+        dealInfo.put("productName", deal.getProduct() != null ? deal.getProduct().getName() : null);
+        dealInfo.put("memberCount", (int) totalMembers);
+        dealInfo.put("currentMembers", (int) approvedMembers);
+        dealInfo.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
+        dealInfo.put("createdAt", deal.getCreatedAt());
+        dealInfo.put("creatorName", deal.getInitiator() != null ? deal.getInitiator().getName() : "Unknown");
+        return dealInfo;
+    }
     
     // Remove the second constructor to avoid initialization issues
     // public GroupDealController(GroupDealService groupDealService) {
@@ -77,38 +151,17 @@ public class GroupDealController {
         try {
             User current = requireCurrentUser(request);
             body.put("initiatorId", current.getUserId());
-            // Ensure the creator is automatically added as a member
             GroupDeal deal = groupDealService.createGroupDeal(body);
-            
-            // Try to add creator as member if initiatorId is provided
-            Object initiatorId = body.get("initiatorId");
-            if (initiatorId != null) {
-                try {
-                    Long userId = Long.valueOf(initiatorId.toString());
-                    // Join the deal and set as approved since creator auto-joins
-                    Object joinResult = groupDealService.joinGroupDeal(deal.getId(), userId);
-                    
-                    // Creator is automatically approved when joining
-                    // Note: If your service has an approveJoinRequest method, uncomment below:
-                    // groupDealService.approveJoinRequest(deal.getId(), userId);
-                } catch (Exception e) {
-                    // Log the error but don't fail deal creation
-                    System.err.println("Failed to add creator as member: " + e.getMessage());
-                }
-            }
-            
-            // Refresh deal to get updated member count
-            deal = groupDealService.getDealById(deal.getId());
-            
+
             Map<String, Object> dto = new HashMap<>();
             dto.put("id", deal.getId());
             dto.put("productId", deal.getProduct()!=null? deal.getProduct().getId(): null);
             dto.put("productName", deal.getProduct()!=null? deal.getProduct().getName(): null);
-            dto.put("memberCount", deal.getMembers()!=null? deal.getMembers().size(): 0);
+            dto.put("memberCount", (int) groupMemberRepository.countByDeal_Id(deal.getId()));
+            dto.put("currentMembers", (int) groupMemberRepository.countByDeal_IdAndApprovedTrue(deal.getId()));
             dto.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
             dto.put("status", deal.getStatus());
-            // Set creatorId from initiatorId
-            dto.put("creatorId", initiatorId);
+            dto.put("creatorId", current.getUserId());
             dto.put("success", true);
             dto.put("message", "Group deal created successfully");
             return ResponseEntity.ok(dto);
@@ -129,28 +182,41 @@ public class GroupDealController {
             m.put("id", deal.getId());
             m.put("productId", deal.getProduct() != null ? deal.getProduct().getId() : null);
             m.put("productName", deal.getProduct() != null ? deal.getProduct().getName() : null);
-            m.put("memberCount", deal.getMembers() != null ? deal.getMembers().size() : 0);
+            putMemberCounts(m, deal.getId());
             m.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
             m.put("status", deal.getStatus());
-            // Set creatorId to null for now - will be properly implemented when creator field is added to GroupDeal
-            m.put("creatorId", null);
+            m.put("creatorId", deal.getInitiator() != null ? deal.getInitiator().getUserId() : null);
             m.put("createdAt", deal.getCreatedAt());
             return m;
         }).toList();
         return ResponseEntity.ok(dto);
     }
 
+    // Current user's deals (JWT — no userId in path)
+    @GetMapping("/mine")
+    public ResponseEntity<List<Map<String, Object>>> getMyDeals(HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        return getAllDealsForUser(current.getUserId(), request);
+    }
+
+    // Joinable deals for current user (JWT)
+    @GetMapping("/joinable/me")
+    public ResponseEntity<List<Map<String, Object>>> getJoinableDealsForMe(HttpServletRequest request) {
+        User current = requireCurrentUser(request);
+        return getJoinableDeals(current.getUserId(), request);
+    }
+
     // Get deal by id — return trimmed summary
     @GetMapping("/{id}")
     public ResponseEntity<Map<String,Object>> getDeal(@PathVariable Long id) {
         GroupDeal deal = groupDealService.getDealById(id);
-        Map<String,Object> dto = Map.of(
-                "id", deal.getId(),
-                "productId", deal.getProduct()!=null? deal.getProduct().getId(): null,
-                "productName", deal.getProduct()!=null? deal.getProduct().getName(): null,
-                "memberCount", deal.getMembers()!=null? deal.getMembers().size(): 0,
-                "status", deal.getStatus()
-        );
+        Map<String, Object> dto = new HashMap<>();
+        dto.put("id", deal.getId());
+        dto.put("productId", deal.getProduct() != null ? deal.getProduct().getId() : null);
+        dto.put("productName", deal.getProduct() != null ? deal.getProduct().getName() : null);
+        putMemberCounts(dto, deal.getId());
+        dto.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
+        dto.put("status", deal.getStatus());
         return ResponseEntity.ok(dto);
     }
 
@@ -190,50 +256,11 @@ public class GroupDealController {
             
             // Filter out deals user has already joined or created
             List<Map<String, Object>> joinableDeals = allDeals.stream()
-                .filter(deal -> !userDealIds.contains(deal.getId()) && 
+                .filter(deal -> !userDealIds.contains(deal.getId()) &&
                               (deal.getInitiator() == null || !deal.getInitiator().getUserId().equals(userId)))
-                .map(deal -> {
-                    Map<String, Object> dealInfo = new HashMap<>();
-                    dealInfo.put("id", deal.getId());
-                    dealInfo.put("title", deal.getTitle());
-                    dealInfo.put("description", deal.getDescription());
-                    dealInfo.put("currentMembers", deal.getMembers() != null ? deal.getMembers().size() : 0);
-                    dealInfo.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
-                    dealInfo.put("createdAt", deal.getCreatedAt());
-                    
-                    // Handle creator name safely
-                    String creatorName = "Unknown";
-                    if (deal.getInitiator() != null) {
-                        // Use getter methods that exist in your User class
-                        // Common alternatives: getFirstname()/getLastname() or getName()
-                        String name = "";
-                        try {
-                            // Try common getter patterns
-                            if (deal.getInitiator().getClass().getMethod("getFirstname") != null && 
-                                deal.getInitiator().getClass().getMethod("getLastname") != null) {
-                                String firstName = (String) deal.getInitiator().getClass()
-                                    .getMethod("getFirstname").invoke(deal.getInitiator());
-                                String lastName = (String) deal.getInitiator().getClass()
-                                    .getMethod("getLastname").invoke(deal.getInitiator());
-                                name = (firstName + " " + lastName).trim();
-                            } else if (deal.getInitiator().getClass().getMethod("getName") != null) {
-                                name = (String) deal.getInitiator().getClass()
-                                    .getMethod("getName").invoke(deal.getInitiator());
-                            }
-                            if (name != null && !name.trim().isEmpty()) {
-                                creatorName = name;
-                            }
-                        } catch (Exception e) {
-                            // If reflection fails, use toString() or default
-                            creatorName = deal.getInitiator().toString();
-                        }
-                    }
-                    dealInfo.put("creatorName", creatorName);
-                    
-                    return dealInfo;
-                })
+                .map(this::buildJoinableDealDto)
                 .collect(Collectors.toList());
-                
+
             return ResponseEntity.ok(joinableDeals);
         } catch (Exception e) {
             e.printStackTrace();
@@ -250,36 +277,37 @@ public class GroupDealController {
         try {
             User current = requireCurrentUser(request);
             if (!canAccessUser(current, userId)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
-            // Check if user has already joined this deal using service layer
-            GroupDeal deal = groupDealService.getDealById(dealId);
-            boolean alreadyJoined = deal.getMembers() != null && 
-                                 deal.getMembers().stream()
-                                     .anyMatch(m -> m.getUser() != null && 
-                                                  m.getUser().getUserId() != null && 
-                                                  m.getUser().getUserId().equals(userId));
-            
-            if (alreadyJoined) {
-                return ResponseEntity.badRequest().body(Map.of(
-                    "success", false,
-                    "message", "You have already joined this deal"
-                ));
+            if (groupMemberRepository.findByDeal_IdAndUser_UserId(dealId, userId).isPresent()) {
+                GroupMember existing = groupMemberRepository.findByDeal_IdAndUser_UserId(dealId, userId).get();
+                if (existing.isApproved()) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "success", false,
+                            "message", "You have already joined this deal"
+                    ));
+                }
+                Map<String, Object> pending = new HashMap<>();
+                pending.put("success", true);
+                pending.put("message", "Join request already pending approval");
+                pending.put("approved", false);
+                pending.put("dealId", dealId);
+                pending.put("userId", userId);
+                pending.put("memberCount", groupMemberRepository.countByDeal_Id(dealId));
+                pending.put("currentMembers", groupMemberRepository.countByDeal_IdAndApprovedTrue(dealId));
+                return ResponseEntity.ok(pending);
             }
-            
-            // Join the deal (will be added to group_members with approved=false)
+
             groupDealService.joinGroupDeal(dealId, userId);
-            
-            // Get updated deal info
-            deal = groupDealService.getDealById(dealId);
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Successfully requested to join the deal");
-            response.put("memberCount", deal.getMembers() != null ? deal.getMembers().size() : 0);
-            response.put("maxMembers", deal.getMaxMembers() != null ? deal.getMaxMembers() : 10);
+            GroupDeal joinedDeal = groupDealService.getDealById(dealId);
+            putMemberCounts(response, dealId);
+            response.put("maxMembers", joinedDeal.getMaxMembers() != null ? joinedDeal.getMaxMembers() : 10);
             response.put("dealId", dealId);
             response.put("userId", userId);
-            response.put("approved", false); // New joins are pending approval
-            
+            response.put("approved", false);
+
             return ResponseEntity.ok(response);
             
         } catch (Exception e) {
@@ -333,27 +361,7 @@ public class GroupDealController {
 
             List<Map<String, Object>> out = new ArrayList<>();
             for (GroupDeal deal : byId.values()) {
-                boolean isCreator = deal.getInitiator() != null && deal.getInitiator().getUserId() != null && deal.getInitiator().getUserId().equals(userId);
-                Long creatorId = deal.getInitiator() != null ? deal.getInitiator().getUserId() : null;
-
-                Integer maxMembers = deal.getMaxMembers();
-                if (maxMembers == null && deal.getProduct() != null) {
-                    maxMembers = deal.getProduct().getDealMaxMembers();
-                }
-
-                Map<String, Object> m = new HashMap<>();
-                m.put("id", deal.getId());
-                m.put("productId", deal.getProduct() != null ? deal.getProduct().getId() : null);
-                m.put("productName", deal.getProduct() != null ? deal.getProduct().getName() : null);
-                m.put("memberCount", deal.getMembers() != null ? deal.getMembers().size() : 0);
-                m.put("maxMembers", maxMembers != null ? maxMembers : 10);
-                m.put("status", deal.getStatus());
-                m.put("createdAt", deal.getCreatedAt());
-                m.put("creatorId", creatorId);
-                m.put("isCreator", isCreator);
-                m.put("isMember", true);
-                m.put("userRole", isCreator ? "CREATOR" : "MEMBER");
-                out.add(m);
+                out.add(buildDealDto(deal, userId));
             }
 
             return ResponseEntity.ok(out);
@@ -455,6 +463,38 @@ public class GroupDealController {
         return ResponseEntity.ok(response);
     }
 
+    // Approve all pending join requests for a deal (creator or admin)
+    @PostMapping("/{dealId}/approve-all")
+    public ResponseEntity<Map<String, Object>> approveAllPendingMembers(@PathVariable Long dealId, HttpServletRequest request) {
+        try {
+            User current = requireCurrentUser(request);
+            GroupDeal deal = groupDealService.getDealById(dealId);
+            if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+
+            List<User> pendingUsers = groupDealService.getPendingMembers(dealId);
+            int approvedCount = 0;
+            for (User pendingUser : pendingUsers) {
+                groupDealService.approveMember(dealId, pendingUser.getUserId());
+                approvedCount++;
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", approvedCount > 0
+                    ? "Approved " + approvedCount + " pending member(s)"
+                    : "No pending members to approve");
+            response.put("dealId", dealId);
+            response.put("approvedCount", approvedCount);
+            putMemberCounts(response, dealId);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "Error approving members: " + e.getMessage()
+            ));
+        }
+    }
+
     // Approve member join request - updates group_member table
     @PostMapping("/{dealId}/approve/{userId}")
     public ResponseEntity<Map<String, Object>> approveMember(@PathVariable Long dealId, @PathVariable Long userId, HttpServletRequest request) {
@@ -464,14 +504,13 @@ public class GroupDealController {
             if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             GroupMember approvedMember = groupDealService.approveMember(dealId, userId);
 
-            deal = groupDealService.getDealById(dealId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Member approved successfully");
             response.put("dealId", dealId);
             response.put("userId", userId);
             response.put("approved", true);
-            response.put("memberCount", deal.getMembers() != null ? deal.getMembers().size() : 0);
+            putMemberCounts(response, dealId);
             response.put("userName", approvedMember.getUser().getName());
             response.put("userEmail", approvedMember.getUser().getEmail());
 
@@ -493,13 +532,12 @@ public class GroupDealController {
             if (!canModerateDeal(current, deal)) return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
             groupDealService.rejectMember(dealId, userId);
 
-            deal = groupDealService.getDealById(dealId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Member rejected and removed from deal");
             response.put("dealId", dealId);
             response.put("userId", userId);
-            response.put("memberCount", deal.getMembers() != null ? deal.getMembers().size() : 0);
+            putMemberCounts(response, dealId);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of(
